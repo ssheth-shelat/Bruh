@@ -1,48 +1,92 @@
 #include "main.h"
 #include "lemlib/api.hpp" // IWYU pragma: keep
 
-pros::MotorGroup right_motors({9, 10, -8}, pros::MotorGearset::blue);
-pros::MotorGroup left_motors({-13, -2, 3}, pros::MotorGearset::blue);
-pros::Imu imu(7);
-
-//vertical tracking wheel encoder
-pros::Rotation vertical_encoder(6); //-2.875 inch from tracking center (7.5, 6.25), //-0.6 in
-// vertical tracking wheel., front of the bot touched with offset of 4
-lemlib::TrackingWheel vertical_tracking_wheel(&vertical_encoder, lemlib::Omniwheel::NEW_2, -1); //0.75, 2 came forward but clamp right of y,
-//horizontal tracking wheel encoder
-pros::adi::Encoder horizontal_encoder('E', 'F', true); //-3.75 in
-// horizontal tracking wheel
-lemlib::TrackingWheel horizontal_tracking_wheel(&horizontal_encoder, lemlib::Omniwheel::OLD_275_HALF, 3); // began -4, -8 was far back on x, 4 left of y too far forward x, 1 worked, 3.63
-
-pros::Motor intake_bottom(-20, pros::MotorGearset::blue);
-pros::Motor intake_top(19, pros::MotorGearset::blue);
+pros::MotorGroup left_motors({-2, -3, -4}, pros::MotorGearset::blue);
+pros::MotorGroup right_motors({9, 10, 8}, pros::MotorGearset::blue);
+//pros::Imu imu(4);
+pros::Motor intake(-11, pros::MotorGearset::blue);
+pros::Motor leftWallStake(12, pros::MotorGearset::blue);
+pros::Motor rightWallStake(-13, pros::MotorGearset::blue);
 //pros::adi::Pneumatics clamp1("A");
 //pros::adi::Pneumatics clamp2("H");
 //pros::adi::Pneumatics clamp1 = pros::adi::Pneumatics('A'); // Create a pneumatic in port A
 //pros::adi::digital clamp1('A'); // Create a pneumatic in port A
 pros::adi::DigitalOut clamp1('A', false);
-pros::adi::DigitalOut clamp2('H', false);
+pros::adi::DigitalOut clamp2('B', false);
+pros::adi::DigitalOut wall_stake_piston('F', false);
+pros::Imu imu(6);
+
+volatile int controlMode = 0; // 0 = None, 1 = Lift Control, 2 = Alliance Control
+void setControlMode(int mode) {
+    controlMode = mode;
+}
+
+const int numWallStates = 3;
+int wallStates[numWallStates] = {0, -600, -2000};
+int currWallState = 0;
+int wallTarget = 0;
+
+void nextWallState(){
+	currWallState += 1;
+	setControlMode(1);
+	if(currWallState==numWallStates){
+		currWallState=0;
+	}
+	wallTarget = wallStates[currWallState];
+}
+
+void liftControl(){
+	double kp = 0.5;
+	double average = (rightWallStake.get_position() + leftWallStake.get_position())/2;
+	double error = wallTarget - average;
+	double velocity = kp * error;
+	leftWallStake.move(velocity);
+	rightWallStake.move(velocity);
+}
+
+const int numAllianceStates = 3;
+int allianceStates[numAllianceStates] = {0, -300, -3000};
+int currAllianceState = 0;
+int allianceTarget = 0;
+
+void nextAllianceState(){
+	currAllianceState += 1;
+	setControlMode(2);
+	if(currAllianceState==numAllianceStates){
+		currAllianceState=0;
+	}
+	allianceTarget = allianceStates[currAllianceState];
+}
+
+void allianceControl(){
+	double kp = 0.5;
+	double average = (rightWallStake.get_position() + leftWallStake.get_position())/2;
+	double error = allianceTarget - average;
+	double velocity = kp * error;
+	leftWallStake.move(velocity);
+	rightWallStake.move(velocity);
+}
 
 // drivetrain settings
 lemlib::Drivetrain drivetrain(&left_motors, // left motor group
                               &right_motors, // right motor group
-                              12.25, // 10 inch track width
+                              12, // 10 inch track width
                               lemlib::Omniwheel::NEW_275, // using new 4" omnis
                               600, // drivetrain rpm is 360
                               2 // horizontal drift is 2 (for now)
 );
 
-lemlib::OdomSensors sensors(&vertical_tracking_wheel,//nullptr, // vertical tracking wheel 1, set to null
+lemlib::OdomSensors sensors(nullptr, // vertical tracking wheel 1, set to null
                             nullptr, // vertical tracking wheel 2, set to nullptr as we are using IMEs
-                            &horizontal_tracking_wheel,//nullptr, // horizontal tracking wheel 1
+                            nullptr, // horizontal tracking wheel 1
                             nullptr, // horizontal tracking wheel 2, set to nullptr as we don't have a second one
                             &imu // inertial sensor
 );
 
 // lateral PID controller
-lemlib::ControllerSettings lateral_controller(9, // proportional gain (kP)
+lemlib::ControllerSettings lateral_controller(12, // proportional gain (kP)
                                               0, // integral gain (kI)
-                                              14, // derivative gain (kD)
+                                              22, // derivative gain (kD)
                                               3, // anti windup
                                               1, // small error range, in inches
                                               100, // small error range timeout, in milliseconds
@@ -52,14 +96,14 @@ lemlib::ControllerSettings lateral_controller(9, // proportional gain (kP)
 );
 
 // angular PID controller
-lemlib::ControllerSettings angular_controller(3, // proportional gain (kP)
+lemlib::ControllerSettings angular_controller(3.5, // proportional gain (kP)
                                               0, // integral gain (kI)
-                                              22, // derivative gain (kD)
+                                              21, // derivative gain (kD)
                                               3, // anti windup
-                                              1, // small error range, in degrees
+                                              0.5, // small error range, in inches
                                               100, // small error range timeout, in milliseconds
-                                              3, // large error range, in degrees
-                                              500, // large error range timeout, in milliseconds
+                                              1, // large error range, in inches
+                                              800, // large error range timeout, in milliseconds
                                               0 // maximum acceleration (slew)
 );
 
@@ -100,8 +144,30 @@ void initialize() {
 
 	pros::lcd::initialize(); // initialize brain screen
     chassis.calibrate(); // calibrate sensors
-	// imu.reset();
-	chassis.setPose(0, 0, 0);
+
+	clamp1.set_value(true);
+	clamp2.set_value(false);
+
+	pros::Task liftControlTask([]{
+		while(true){
+			if (controlMode == 1) {
+            liftControl();
+        	}
+			pros::delay(10);
+		}
+
+	});
+
+
+	pros::Task allianceControlTask([]{
+		while(true){
+			if (controlMode == 2) {
+            allianceControl();
+			}
+			pros::delay(10);
+		}
+
+	});
 
 	// print position to brain screen
     pros::Task screen_task([&]() {
@@ -110,17 +176,7 @@ void initialize() {
 		pros::lcd::print(0, "X: %f", chassis.getPose().x); // x
 		pros::lcd::print(1, "Y: %f", chassis.getPose().y); // y
 		pros::lcd::print(2, "Theta: %f", chassis.getPose().theta); // heading
-		// print measurements from the rotation sensor
-        pros::lcd::print(3, "Rotation Sensor: %i", vertical_encoder.get_position());
-		// print measurements from the adi encoder
-        // pros::lcd::print(4, "ADI Encoder: %i", horizontal_encoder.get_value());
-
-		//pros::lcd::print(5, "IMU get heading: %f degrees\n", imu.get_heading());
-
-		pros::lcd::print(5, "IMU: %f", imu.get_heading());
-		// pros::lcd::print(6, "Horizontal: %f", horizontal_tracking_wheel.getDistanceTraveled());
-		//pros::lcd::print(7, "Vertical: %f", vertical_tracking_wheel.getDistanceTraveled());
-		// // delay to save resources
+		// delay to save resources
 		pros::delay(20);
 	}
     });
@@ -142,8 +198,7 @@ void disabled() {}
  * This task will exit when the robot is enabled and autonomous or opcontrol
  * starts.
  */
-void competition_initialize() {
-}
+void competition_initialize() {}
 
 /**
  * Runs the user autonomous code. This function will be started in its own task
@@ -157,195 +212,89 @@ void competition_initialize() {
  * from where it left off.
  */
 
-void intake_move_for(int seconds, int direction){
-	//intake
-	seconds = seconds*1000;
-	if(direction == 1){
-		intake_bottom.move_velocity(-600);
-		intake_top.move_velocity(600);
-		pros::delay(seconds); // 1000 miliseconds is 1 second
-		intake_bottom.move_velocity(0);
-		intake_top.move_velocity(0);
-	}
-	else if(direction == 0){
-		intake_bottom.move_velocity(600);
-		intake_top.move_velocity(-600);
-		pros::delay(seconds); // 1000 miliseconds is 1 second
-		intake_bottom.move_velocity(0);
-		intake_top.move_velocity(0);
-	}
-}
-
-void clamp(){
-	clamp1.set_value(true);
-	clamp2.set_value(false);
-}
-
-void unclamp(){
-	clamp1.set_value(false);
-	clamp2.set_value(true);
-}
+// void intake_move_for(int seconds){
+// 	//intake
+// 	intake_bottom.move_velocity(-600);
+// 	intake_top.move_velocity(600);
+// 	seconds = seconds*1000;
+// 	pros::delay(seconds); // 1000 miliseconds is 1 second
+// 	intake_bottom.move_velocity(0);
+// 	intake_top.move_velocity(0);
+// }
 
 // red ring and blue goal same
 // blue ring and red goal same
 
 void autonomous() {
 	// set position to x:0, y:0, heading:0
-	// if async false waits until exit time before moving to next command dont need delay
-	// use swing to heading for mobile goals
-	//each field tile is 23.622 inches
-	// 5.25+0.5+6.25 = 12
-	
-	// chassis.setPose(0, 0, 0);
-	// // pros::delay(6000);
-	// // chassis.turnToHeading(90, 1000);
-	// chassis.moveToPoint(0, 24, 2000);
-	// chassis.turnToHeading(0, 1000);
-	// pros::delay(6000);
-	// chassis.turnToHeading(90, 1000);
-	// chassis.moveToPoint(24, 24, 2000);
-	// chassis.turnToHeading(90, 1000);
-	// pros::delay(6000);
-	// chassis.turnToHeading(180, 1000);
-	// chassis.moveToPoint(24, 0, 2000);
-	// chassis.turnToHeading(180, 1000);
-	// pros::delay(6000);
-	// chassis.turnToHeading(270, 1000);
-	// chassis.moveToPoint(0, 0, 2000);
-	// chassis.turnToHeading(0, 1000);
-
-
-
-
-	chassis.setPose(72, 12, 0); //11.9375, was 10.75
-	pros::delay(1000);
-	// unclamp
-	clamp1.set_value(false);
-	clamp2.set_value(true);
-
-	//clamp
-	chassis.moveToPoint(72, (24-1), 2000);
-	// chassis.moveToPose(72, 24, 0, 2000);
-	chassis.turnToHeading(0, 1000);
-	//pros::delay(5000);
-	// chassis.turnToHeading(90,1000);
-	chassis.turnToHeading(90, 1000);
-	// chassis.moveToPose(59, 24, 90, 3000, {.minSpeed = 100}, false);
-	//pros::delay(2000);
-	chassis.moveToPoint(60, (24-1), 10000, {.forwards=false});
-	//pros::delay(1000);
-	//chassis.turnToHeading(270, 1000);
-	chassis.moveToPoint(50, (24-1), 1000, {.forwards=false}, false);
-	clamp1.set_value(true);
-	clamp2.set_value(false);
-	//score ring 1
-	//chassis.moveToPoint((48+6), 24, 1000);
-	chassis.turnToHeading(0, 1000);
-	intake_bottom.move_velocity(-600);
-	intake_top.move_velocity(600);
-	chassis.moveToPoint((48+2), (48-4), 2000);
-	chassis.turnToHeading(0, 1000);
-	//move to top of tile
-	chassis.turnToHeading(315, 1000);
-	chassis.moveToPoint(33, 74, 2000);
-	//score second ring
-	chassis.turnToHeading(270, 1000);
-	chassis.moveToPoint(22, 75, 1000);
-	chassis.turnToHeading(270, 1000);
-	//back up and face rings 3, 4 and 5
-	chassis.moveToPoint(24, 75, 2000, {.forwards=false});
-	chassis.turnToHeading(270, 1000);
-	chassis.turnToHeading(182, 1000);
-	//score rings 3, 4, and 5
-	chassis.moveToPoint((24-2), (24-6), 2500, {.maxSpeed=90});
+    chassis.setPose(74.5, 9.75, 0); //was 12.25 add or minues 2.5
+	chassis.turnToHeading(90, 2000);
 	pros::delay(3000);
-	//back into corner and unclamp
-	chassis.moveToPoint(26, (20+2), 1500, {.maxSpeed=90}, false);//originally 20
-	chassis.turnToHeading(45, 1000);
-	chassis.moveToPoint(10, 10, 1500, {.forwards = false}, false);
-	clamp1.set_value(false);
-	clamp2.set_value(true);
-	//back out of corner and move in line to mobile goal
-	chassis.turnToHeading(45, 1000);
-	intake_bottom.move_velocity(0);
-	intake_top.move_velocity(0);
-	intake_top.move_velocity(-600);
-	pros::delay(800);
-	intake_top.move_velocity(0);
-	chassis.moveToPoint(28, (20-2), 1500);//originally 20
-	chassis.turnToHeading(270, 1000);
-	//clamp second mobile goal
-	chassis.moveToPoint((72+6), (24-10), 5000,{.forwards = false});// was 24-9
-	chassis.turnToHeading(270, 1000);
-	//pros::delay(500);
-	chassis.moveToPoint((96-6), (24-12), 1000,{.forwards = false});//was 24-11
-	chassis.turnToHeading(270, 1000);
-	clamp1.set_value(true);
-	clamp2.set_value(false);
-	//get first ring
-	chassis.moveToPoint((96-2), (24-12), 1000,{.forwards = false});
-	intake_bottom.move_velocity(-600);
-	intake_top.move_velocity(600);
-	chassis.turnToHeading(0, 1000);
-	chassis.moveToPoint((96-2), 36, 2000);
-	chassis.turnToHeading(0, 1000);
-	//move to top of tile
-	chassis.turnToHeading(50, 1000);
-	chassis.moveToPoint(112, 57, 2000);
-	//score ring 2
-	chassis.turnToHeading(90, 1000);
-	chassis.moveToPoint(121, 59, 2000, {}, false);
-	chassis.turnToHeading(90, 1000);
-	//back up
-	chassis.moveToPoint(116, 59, 2000, {.forwards=false});
-	chassis.turnToHeading(90, 1000);
-	chassis.turnToHeading(178, 1000);
-	//score rings 3, 4, and 5
-	chassis.moveToPoint((120-4), (24-8), 2500, {.maxSpeed=90});
-	pros::delay(2000);
-	chassis.moveToPoint((120-4), (24-18), 2500, {.maxSpeed=90});
-	pros::delay(1500);
-	//back into corner and unclamp
-	chassis.moveToPoint((120-8), (24-10), 1500, {.forwards = false});
-	chassis.turnToHeading(315, 1000);
-	chassis.moveToPoint(130, -4, 2000, {.forwards = false}, false);
-	clamp1.set_value(false);
-	clamp2.set_value(true);
-	//back out of corner and line up to other side of field
-	chassis.turnToHeading(315, 1000);
-	intake_bottom.move_velocity(0);
-	intake_top.move_velocity(0);
-	intake_top.move_velocity(-600);
-	pros::delay(800);
-	intake_top.move_velocity(0);
-	chassis.moveToPoint((120-8), (24-6), 2000);
-	chassis.turnToHeading(0, 1000);
-	//move to other side of field
-	intake_bottom.move_velocity(-600);
-	intake_top.move_velocity(600);
-	chassis.moveToPoint((120-8), (108-26), 7500, {.minSpeed=80});
-	chassis.turnToHeading(270, 1000);
-	
-	//get behind mobile goal
-	chassis.moveToPoint((84-7), (108-24), 4000);//was 84-5
-	//chassis.turnToHeading(270, 1000);
-	intake_bottom.move_velocity(0);
-	intake_top.move_velocity(0);
-	chassis.turnToHeading(0, 1000);
-	chassis.moveToPoint((84-3), (120+4), 1000); //was 84-3
-	chassis.turnToHeading(85, 1000);
-	//push mobile in
-	chassis.moveToPoint((120+2), (120+6), 1400);
-	//back up and face second mobile goal
-	chassis.turnToHeading(90, 1000);
-	chassis.moveToPoint((120-10), (120-6), 4000, {.forwards=false});
-	chassis.turnToHeading(270, 1000);
-	//push second mobile goal in
-	chassis.moveToPoint(48, 120-4, 2500, {.minSpeed=90});
-	chassis.moveToPoint(8, 120+13, 10000, {.minSpeed=95});
+	chassis.turnToHeading(0, 2000);
+	//move forward
+	// chassis.moveToPoint(74.5, 24, 2000);
+	// chassis.turnToHeading(0, 1000);
+	// //move to mobile goal
+	// chassis.turnToHeading(90, 1000);
+	// chassis.moveToPoint(48, 24, 2000, {.forwards=false});
+	// //chassis.turnToHeading(90, 1000, {}, false);
+	// //clamp
+	// pros::delay(1000);
+	// clamp1.set_value(false);
+	// clamp2.set_value(true);
+	// pros::delay(1000);
+	// //start intake
+	// intake.move_velocity(-600);
+	// //move to first ring
+	// chassis.turnToHeading(0, 1000);
+	// chassis.moveToPoint((48-5), (48+2.5), 2000);
+	// chassis.turnToHeading(0, 1000);
+	// //move to top of tile
+	// chassis.turnToHeading(315, 1000);
+	// chassis.moveToPoint((24-0), (72+0), 2000);
+	// // score second ring
+	// chassis.turnToHeading(270, 1000);
+	// chassis.moveToPoint((12-2), (72+0), 2000);
+	// chassis.turnToHeading(270, 1000);
+	// pros::delay(1500);
+	// // back up and turn
+	// chassis.moveToPoint((24-0), (72+0), 2000, {.forwards=false});
+	// chassis.turnToHeading(180, 1000);
+	// //score third
+	// chassis.moveToPoint((24-0), (48+0), 2000);
+	// chassis.turnToHeading(180, 1000);
+	// pros::delay(500);
+	// //score fourth and fifth
+	// chassis.moveToPoint((24-0), (12+4), 2000);
+	// chassis.turnToHeading(180, 1000);
+	// pros::delay(2000);
+	// //drop in corner
+	// chassis.moveToPoint((24-0), (24+0), 2000, {.forwards=false});
+	// chassis.turnToHeading(45, 1000);
+	// chassis.moveToPoint((12-0), (15+0), 2000, {.forwards=false});
+	// chassis.turnToHeading(45, 1000);
+	// pros::delay(1000);
+	// clamp1.set_value(true);
+	// clamp2.set_value(false);
+	// //move to mobile goal and clamp
+	// chassis.turnToHeading(45, 1000);
+	// chassis.moveToPoint((24-0), (24+0), 2000);
+	// chassis.turnToHeading(270, 1000);
+	// chassis.moveToPoint((84-0), (24+0), 6000, {.forwards=false});
+	// // clamp1.set_value(false);
+	// clamp2.set_value(true);
 
 
 }
+
+// motor.move_absolute(100, 100); // at 100 (moves 100)
+// motor.move_absolute(100, 100); // at 100 (moves 0)
+// motor.set_zero_position(80);   // at 20
+// motor.move_absolute(100, 100); // at 100 (moves 80)
+//   // 
+// std::uint32_t now = pros::millis();
+// std::cout << "position = " << motor.get_position()  // prints "position = 100"
+// std::cout << "raw position =" << motor.get_raw_position(&now); // prints "raw position = 180"
 
 /**
  * Runs the operator control code. This function will be started in its own task
@@ -364,165 +313,67 @@ void opcontrol() {
 	pros::Controller controller(pros::E_CONTROLLER_MASTER);
 
 	while (true) {
-		if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_R1)){
-			chassis.setPose(72, 12, 0); //11.9375, was 10.75
-			pros::delay(1000);
-			// unclamp
-			clamp1.set_value(false);
-			clamp2.set_value(true);
-
-			//clamp
-			chassis.moveToPoint(72, (24-1), 2000);
-			// chassis.moveToPose(72, 24, 0, 2000);
-			chassis.turnToHeading(0, 1000);
-			//pros::delay(5000);
-			// chassis.turnToHeading(90,1000);
-			chassis.turnToHeading(90, 1000);
-			// chassis.moveToPose(59, 24, 90, 3000, {.minSpeed = 100}, false);
-			//pros::delay(2000);
-			chassis.moveToPoint(60, (24-1), 10000, {.forwards=false});
-			//pros::delay(1000);
-			//chassis.turnToHeading(270, 1000);
-			chassis.moveToPoint(50, (24-1), 1000, {.forwards=false}, false);
-			clamp1.set_value(true);
-			clamp2.set_value(false);
-			//score ring 1
-			//chassis.moveToPoint((48+6), 24, 1000);
-			chassis.turnToHeading(0, 1000);
-			intake_bottom.move_velocity(-600);
-			intake_top.move_velocity(600);
-			chassis.moveToPoint((48+2), (48-4), 2000);
-			chassis.turnToHeading(0, 1000);
-			//move to top of tile
-			chassis.turnToHeading(315, 1000);
-			chassis.moveToPoint(33, 74, 2000);
-			//score second ring
-			chassis.turnToHeading(270, 1000);
-			chassis.moveToPoint(22, 75, 1000);
-			chassis.turnToHeading(270, 1000);
-			//back up and face rings 3, 4 and 5
-			chassis.moveToPoint(24, 75, 2000, {.forwards=false});
-			chassis.turnToHeading(270, 1000);
-			chassis.turnToHeading(182, 1000);
-			//score rings 3, 4, and 5
-			chassis.moveToPoint((24-2), (24-6), 2500, {.maxSpeed=90});
-			pros::delay(3000);
-			//back into corner and unclamp
-			chassis.moveToPoint(26, (20+2), 1500, {.maxSpeed=90}, false);//originally 20
-			chassis.turnToHeading(45, 1000);
-			chassis.moveToPoint(10, 10, 1500, {.forwards = false}, false);
-			clamp1.set_value(false);
-			clamp2.set_value(true);
-			//back out of corner and move in line to mobile goal
-			chassis.turnToHeading(45, 1000);
-			intake_bottom.move_velocity(0);
-			intake_top.move_velocity(0);
-			intake_top.move_velocity(-600);
-			pros::delay(800);
-			intake_top.move_velocity(0);
-			chassis.moveToPoint(28, (20-2), 1500);//originally 20
-			chassis.turnToHeading(270, 1000);
-			//clamp second mobile goal
-			chassis.moveToPoint((72+6), (24-10), 5000,{.forwards = false});// was 24-9
-			chassis.turnToHeading(270, 1000);
-			//pros::delay(500);
-			chassis.moveToPoint((96-6), (24-12), 1000,{.forwards = false});//was 24-11
-			chassis.turnToHeading(270, 1000);
-			clamp1.set_value(true);
-			clamp2.set_value(false);
-			//get first ring
-			chassis.moveToPoint((96-2), (24-12), 1000,{.forwards = false});
-			intake_bottom.move_velocity(-600);
-			intake_top.move_velocity(600);
-			chassis.turnToHeading(0, 1000);
-			chassis.moveToPoint((96-2), 36, 2000);
-			chassis.turnToHeading(0, 1000);
-			//move to top of tile
-			chassis.turnToHeading(50, 1000);
-			chassis.moveToPoint(112, 57, 2000);
-			//score ring 2
-			chassis.turnToHeading(90, 1000);
-			chassis.moveToPoint(121, 59, 2000, {}, false);
-			chassis.turnToHeading(90, 1000);
-			//back up
-			chassis.moveToPoint(116, 59, 2000, {.forwards=false});
-			chassis.turnToHeading(90, 1000);
-			chassis.turnToHeading(178, 1000);
-			//score rings 3, 4, and 5
-			chassis.moveToPoint((120-4), (24-8), 2500, {.maxSpeed=90});
-			pros::delay(2000);
-			chassis.moveToPoint((120-4), (24-18), 2500, {.maxSpeed=90});
-			pros::delay(1500);
-			//back into corner and unclamp
-			chassis.moveToPoint((120-8), (24-10), 1500, {.forwards = false});
-			chassis.turnToHeading(315, 1000);
-			chassis.moveToPoint(130, -4, 2000, {.forwards = false}, false);
-			clamp1.set_value(false);
-			clamp2.set_value(true);
-			//back out of corner and line up to other side of field
-			chassis.turnToHeading(315, 1000);
-			intake_bottom.move_velocity(0);
-			intake_top.move_velocity(0);
-			intake_top.move_velocity(-600);
-			pros::delay(800);
-			intake_top.move_velocity(0);
-			chassis.moveToPoint((120-8), (24-6), 2000);
-			chassis.turnToHeading(0, 1000);
-			//move to other side of field
-			intake_bottom.move_velocity(-600);
-			intake_top.move_velocity(600);
-			chassis.moveToPoint((120-8), (108-26), 7500, {.minSpeed=80});
-			chassis.turnToHeading(270, 1000);
-			
-			//get behind mobile goal
-			chassis.moveToPoint((84-7), (108-24), 4000);//was 84-5
-			//chassis.turnToHeading(270, 1000);
-			intake_bottom.move_velocity(0);
-			intake_top.move_velocity(0);
-			chassis.turnToHeading(0, 1000);
-			chassis.moveToPoint((84-3), (120+4), 1000); //was 84-3
-			chassis.turnToHeading(85, 1000);
-			//push mobile in
-			chassis.moveToPoint((120+2), (120+6), 1800);
-			//back up and face second mobile goal
-			chassis.turnToHeading(90, 1000);
-			chassis.moveToPoint((120-10), (120-4), 4000, {.forwards=false});
-			chassis.turnToHeading(270, 1000);
-			//push second mobile goal in
-			chassis.moveToPoint(48, 120-4, 2500, {.minSpeed=90});
-			chassis.moveToPoint(8, 120+13, 10000, {.minSpeed=95});
-		}
         //pros::task_t(NULL);
         // get left y and right y positions
-        // int leftY = controller.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
-        // int rightY = controller.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y);
+        int leftY = controller.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
+        int rightY = controller.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y);
 
-        // // move the robot
-        // chassis.tank(leftY, rightY);
+        // move the robot
+        chassis.tank(leftY, rightY);
 
-		// //intake
-		// if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_R1)){
-		// 	intake_bottom.move_velocity(-600);
-		// 	intake_top.move_velocity(600);
+		//intake
+		if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_R1)){
+			intake.move_velocity(-600);
+		}
+		else if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_R2)){
+			intake.move_velocity(600);
+		}
+		else{
+			intake.move_velocity(0);
+		}
+
+		// //wall stake
+		// if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_X)){
+		// 	leftWallStake.move_velocity(-600);
+		// 	rightWallStake.move_velocity(-600);
 		// }
-		// else if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_R2)){
-		// 	intake_bottom.move_velocity(600);
-		// 	intake_top.move_velocity(-600);
+		// else if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_A)){
+		// 	leftWallStake.move_velocity(600);
+		// 	rightWallStake.move_velocity(600);
 		// }
 		// else{
-		// 	intake_bottom.move_velocity(0);
-		// 	intake_top.move_velocity(0);
+		// 	leftWallStake.move_velocity(0);
+		// 	rightWallStake.move_velocity(0);
 		// }
 
-		// //clamp
-		// if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_L1)){
-		// 	clamp1.set_value(false);
-		// 	clamp2.set_value(true);
+		//wall stake piston
+		// if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_UP)){
+		// 	wall_stake_piston.set_value(true);
 		// }
-		// if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_L2)){
-		// 	clamp1.set_value(true);
-		// 	clamp2.set_value(false);
+		// if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_DOWN)){
+		// 	wall_stake_piston.set_value(false);
 		// }
+
+		if(controller.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_UP)){
+			setControlMode(1);
+			nextWallState();
+		}
+
+		//aliance stake
+		if(controller.get_digital_new_press(pros::E_CONTROLLER_DIGITAL_DOWN)){
+			setControlMode(2);
+			nextAllianceState();
+		}
+
+		//clamp
+		if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_L1)){
+			clamp1.set_value(false);
+			clamp2.set_value(true);
+		}
+		if(controller.get_digital(pros::E_CONTROLLER_DIGITAL_L2)){
+			clamp1.set_value(true);
+			clamp2.set_value(false);
+		}
 
 		pros::delay(25);
     }
